@@ -1,16 +1,18 @@
-//! Transparent routing on Linux — the cheap platform.
+//! Transparent routing on Linux.
 //!
-//! No TUN device and no userspace TCP/IP stack are needed: tor's own
-//! `TransPort` does transparent proxying natively. This is the Whonix/Tails
-//! recipe:
+//! Primary path, same as every other platform: a TUN device on the default
+//! route, flows terminated in the userspace stack and dispatched by
+//! `torque-policy`. nftables provides the kill switch — drop all UDP except
+//! what reaches `DNSPort`, drop all IPv6, and permit egress on the physical
+//! interface only for tor, its transports and the service.
 //!
-//! 1. Run tor under its own uid.
-//! 2. nftables in the `nat` table: redirect outbound TCP to `TransPort` and
-//!    outbound port 53 to `DNSPort`, with `meta skuid != <tor uid>` so tor's
-//!    own traffic is excluded — that, not a list of guard addresses, is what
-//!    prevents the routing loop.
-//! 3. In the `filter` table: drop all other UDP and all IPv6, so nothing
-//!    escapes while Tor is up.
+//! The cheap path, kept as an option for when no per-app rules exist: tor's
+//! own `TransPort` does transparent proxying natively, so nftables can
+//! redirect in the `nat` table — outbound TCP to `TransPort`, port 53 to
+//! `DNSPort` — with `meta skuid != <tor uid>` excluding tor's own traffic.
+//! That uid match, not a list of guard addresses, is what prevents the routing
+//! loop. This is the Whonix/Tails recipe, and it cannot support rules keyed on
+//! a program: `skuid` and cgroup matches are as far as it goes.
 //!
 //! Needs `CAP_NET_ADMIN`, which is why it lives in the privileged service.
 

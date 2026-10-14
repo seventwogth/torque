@@ -30,6 +30,8 @@ torque-control   Tor control protocol: cookie auth, SETCONF/SETEVENTS,
                  reply parser, BW/CIRC/STREAM/STATUS_CLIENT events
 torque-bridges   bridge-line parsing and validation; which transports a
                  bridge set requires
+torque-policy    (planned) per-app and per-host routing rules: the model and
+                 the evaluation, no I/O
 torque-core      torrc generation, tor process supervision, state model
 torque-router    trait TrafficRouter + per-platform backends
 torque-ipc       newline-delimited JSON protocol, GUI <-> service
@@ -55,17 +57,22 @@ for free.
 
 ## How traffic reaches Tor
 
-| OS | Interception | Handed to | Privilege |
-|---|---|---|---|
-| Windows | Wintun adapter + userspace TCP/IP stack | `SocksPort` | admin |
-| Linux | nftables redirect, tor's uid excluded | `TransPort` | `CAP_NET_ADMIN` |
-| macOS | `utun` + `pf rdr-to` via a root helper | `TransPort` | root |
+One mechanism on all three platforms: a TUN device takes the default route,
+and every flow is terminated in a **userspace TCP/IP stack** (`ipstack` /
+`netstack-smoltcp`, or `tun2proxy` wholesale) which decides per flow where it
+goes. `torque-policy` makes that decision; see the next section.
 
-Windows is the outlier and the expensive case: tor's `TransPort` is not
-supported there, so packets have to be terminated in a userspace TCP/IP stack
-(`ipstack` / `netstack-smoltcp`, or `tun2proxy` wholesale) and handed to SOCKS.
-Linux and macOS use tor's native transparent proxying — the Whonix/Tails
-recipe — and need no TUN device at all.
+| OS | TUN device | Privilege | Firewall |
+|---|---|---|---|
+| Windows | Wintun (`wintun.dll`, signed build) | admin | WFP filters |
+| Linux | `/dev/net/tun` | `CAP_NET_ADMIN` | nftables |
+| macOS | `utun` via a root helper | root | `pf` |
+
+Tor's native `TransPort` would be cheaper on Linux and macOS — the
+Whonix/Tails recipe, no TUN device, no userspace stack. It is kept only as an
+optional fast path for the case where no per-app rules exist, and is not the
+primary design, because a kernel redirect cannot attribute a flow to the
+program that opened it. See below.
 
 Two deliberate non-choices:
 
@@ -76,6 +83,83 @@ Two deliberate non-choices:
 - **Not NetworkExtension** on macOS. A `PacketTunnelProvider` requires Apple
   Developer Program membership and a provisioning profile with the
   network-extension entitlement. `pf` plus a root helper ships without either.
+
+## Per-app and per-host rules (ProxyBridge)
+
+Routing rules per application, and per destination host, with three outcomes:
+through Tor, direct, or blocked.
+
+### Why this is not a firewall feature
+
+On Windows, deciding per program at the firewall means one of two things, and
+both are out of reach for this project:
+
+- a WFP **callout driver** at `FWPM_LAYER_ALE_CONNECT_REDIRECT_V4`, which is a
+  callout-only layer — user-mode filters cannot redirect a connection;
+- a **split-tunnel kernel driver**, the way Mullvad does it: their driver
+  checks each new socket's process binary path and redirects binds away from
+  the tunnel.
+
+Either needs a kernel driver, so EV code signing plus Microsoft attestation
+signing. The user-mode WFP filters that give us the kill switch cannot do it.
+
+### Where it goes instead
+
+Into the userspace flow engine we already need for Windows. The TUN device
+holds the default route, so **every flow arrives at us before it goes
+anywhere**, and the decision is an ordinary function call rather than a
+kernel hook. No driver, same code on all three platforms.
+
+For each new flow the engine needs two facts:
+
+**Which program opened it.** The local port is in the flow; the port-to-PID
+mapping comes from `GetExtendedTcpTable`/`GetExtendedUdpTable` on Windows,
+`/proc/net/*` plus socket inodes on Linux, `libproc` on macOS. Cache it and
+refresh on a miss. A short-lived flow can vanish from the table before we
+look, so **attribution failure must fall through to Tor, never to direct** —
+otherwise the one case we cannot identify is the one that leaks.
+
+**Where it is going.** We own DNS (`DNSPort` plus `AutomapHostsOnResolve`), so
+the name is known before the flow exists and rules can key on it. Two limits
+follow: a connection to a raw IP matches only IP/CIDR rules, and an app with
+its own DoH/DoT resolver is invisible to us by name — either its endpoints get
+blocked, or it only ever matches on IP.
+
+### The rule model
+
+A new crate, `torque-policy`: pure logic, no I/O, tested like
+`torque-bridges`.
+
+```
+Policy  { rules: Vec<Rule>, default: Action }
+Rule    { enabled: bool, matcher: Matcher, action: Action }
+Matcher = Process(path | file name) | Domain(exact | suffix)
+        | Ip(cidr) | Port(range) | All(..) | Any(..) | Not(..)
+Action  = Tor { isolation: Option<String> } | Direct | Block
+```
+
+First match wins. `default` is `Tor`, and the type should make any other
+default an explicit choice by the user.
+
+The `isolation` tag is close to free and worth having: tor isolates circuits
+by SOCKS credentials, with `IsolateSOCKSAuth` on by default, so passing a
+per-rule tag as the SOCKS username gives each app or group its own circuits
+and its own exit. "This browser and that client never share an exit" becomes
+one field in a rule.
+
+### What it costs
+
+Stated plainly, because these are the parts that can mislead a user:
+
+- **The kill switch weakens.** It stops being "only tor may egress": a
+  `Direct` rule means our service egresses on the physical interface on an
+  app's behalf, so WFP is no longer the sole guarantee and a bug in rule
+  evaluation becomes a leak. Everything else is still blocked and the engine
+  fails closed, but transparent-with-rules is a weaker promise than
+  transparent-everything and the UI must not show them as the same thing.
+- **A `Tor` rule silently kills that app's UDP.** Tor carries TCP only. This
+  needs saying per rule, not once in a settings page.
+- **Per-host rules cannot bind a flow whose destination we never resolved.**
 
 ## What transparent mode must get right
 
@@ -116,12 +200,18 @@ Stage numbers are referenced from `torque_router::Error::NotImplemented`.
    `SETCONF`, `moat`/BridgeDB fetch.
 4. **Service** — IPC listener with an ACL, platform service registration,
    supervision moves out of the GUI.
-5. **Windows transparent routing** — Wintun, userspace stack, `DNSPort`,
-   `AutomapHostsOnResolve`.
+5. **Flow engine and ProxyBridge** — Wintun, userspace TCP/IP stack, `DNSPort`
+   and `AutomapHostsOnResolve`, flow-to-process attribution, `torque-policy`
+   evaluation, per-rule stream isolation, rules editor in the UI. Windows
+   first. `torque-policy` itself has no dependency on the rest of this stage
+   and can land earlier.
 6. **Kill switch** — WFP filters, UDP and IPv6 blocked. Transparent mode may
-   only be called safe once this ships.
-7. **Platforms and packaging** — nftables and `pf` backends, MSI installer,
-   code signing, signature-verified updates for the bundled tor binaries.
+   only be called safe once this ships, and transparent-with-rules is labelled
+   separately from transparent-everything.
+7. **Platform backends** — the flow engine on Linux and macOS, plus the
+   optional native `TransPort` fast path for the no-rules case.
+8. **Packaging** — MSI installer, code signing, signature-verified updates for
+   the bundled tor binaries.
 
 ## Known risks
 

@@ -1,18 +1,19 @@
 //! How traffic reaches Tor.
 //!
 //! This is the seam between "Tor is a proxy you point apps at" and "everything
-//! on this machine goes through Tor". The two modes differ enough per platform
-//! that they get one trait and three backends:
+//! on this machine goes through Tor, subject to rules".
 //!
-//! | OS      | interception                             | handed to      |
-//! |---------|------------------------------------------|----------------|
-//! | Windows | Wintun adapter + userspace TCP/IP stack  | `SocksPort`    |
-//! | Linux   | nftables redirect (tor's uid excluded)   | `TransPort`    |
-//! | macOS   | `utun` + `pf rdr-to` via a root helper   | `TransPort`    |
+//! Every backend puts a TUN device on the default route and terminates flows
+//! in a userspace TCP/IP stack, because per-app routing rules need to know
+//! which program opened a flow — something a kernel redirect cannot tell us
+//! without a signed driver. Tor's native `TransPort` stays available as a fast
+//! path only where no rules are configured.
 //!
-//! Windows is the odd one out and the expensive one: tor's `TransPort` is not
-//! supported there, so packets must be turned into TCP connections in
-//! userspace and handed to SOCKS.
+//! | OS      | TUN device                      | firewall |
+//! |---------|---------------------------------|----------|
+//! | Windows | Wintun (`wintun.dll`, signed)   | WFP      |
+//! | Linux   | `/dev/net/tun`                  | nftables |
+//! | macOS   | `utun` via a root helper        | `pf`     |
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -77,6 +78,10 @@ pub struct RoutePlan {
     /// Executables allowed to bypass the tunnel — tor itself and its
     /// transports. Matching on the process, not on the guard's IP, is what
     /// makes the kill switch hold when guards rotate.
+    ///
+    /// Once `torque-policy` lands (stage 5) the service joins this list, since
+    /// a `Direct` rule makes it egress on an app's behalf. That is also when
+    /// the kill switch stops being a firewall-only guarantee.
     pub bypass: Vec<PathBuf>,
 }
 
