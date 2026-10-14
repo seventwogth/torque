@@ -7,8 +7,12 @@
 //! Usage:
 //!   torque-cli                       proxy-only, no bridges
 //!   torque-cli bridges.txt           one bridge line per line, `#` comments
+//!   torque-cli service <command>     talk to a running torque-service
 //!
-//! Requires the Tor Expert Bundle unpacked into `vendor/`.
+//! Driving the engine needs the Tor Expert Bundle unpacked into `vendor/`;
+//! the `service` client does not.
+
+mod client;
 
 use std::path::PathBuf;
 
@@ -28,11 +32,16 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|first| first == "service") {
+        return client::run(&args[1..]).await;
+    }
+
     let layout = Layout::discover().context("locating data and vendor directories")?;
     let mut config = TorConfig::new(RoutingMode::ProxyOnly);
     config.plugins = TransportPlugin::expert_bundle(&layout);
 
-    if let Some(path) = std::env::args().nth(1).map(PathBuf::from) {
+    if let Some(path) = args.first().map(PathBuf::from) {
         let text = tokio::fs::read_to_string(&path)
             .await
             .with_context(|| format!("reading bridge lines from {}", path.display()))?;

@@ -15,6 +15,10 @@
 //! leaf crate with no I/O, so sharing it makes the two halves agree on a
 //! vocabulary instead of leaking an implementation across.
 
+mod transport;
+
+pub use transport::{Connection, Listener, connect};
+
 use serde::{Deserialize, Serialize};
 use torque_policy::{Lint, Policy};
 
@@ -92,6 +96,10 @@ pub struct Status {
     /// False while transparent mode is requested but its kill switch is not
     /// actually installed — the UI must not claim protection it lacks.
     pub kill_switch_active: bool,
+    /// False while the service stores routing rules but nothing evaluates
+    /// them yet. Same reasoning: the UI cannot be allowed to imply that rules
+    /// are in force when no flow engine is reading them.
+    pub policy_enforced: bool,
     pub bandwidth: Bandwidth,
     pub circuits: Vec<Circuit>,
 }
@@ -121,13 +129,22 @@ pub fn decode<T: for<'de> Deserialize<'de>>(frame: &str) -> serde_json::Result<T
     serde_json::from_str(frame.trim_end())
 }
 
-/// Where the service listens. The name is fixed so the GUI can find it, and
-/// access control is done with an ACL on the endpoint, not by obscurity.
+/// Where the service listens. The name is fixed so the UI can find it;
+/// access control is on the endpoint itself, never obscurity. See
+/// [`transport`] for what that boundary currently is.
 pub fn endpoint() -> String {
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         r"\\.\pipe\torque".to_owned()
-    } else {
-        "/run/torque/torque.sock".to_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        // The per-user runtime directory while the service is unelevated;
+        // /run/torque once it is a system daemon.
+        match std::env::var("XDG_RUNTIME_DIR") {
+            Ok(dir) if !dir.is_empty() => format!("{dir}/torque.sock"),
+            _ => "/run/torque/torque.sock".to_owned(),
+        }
     }
 }
 

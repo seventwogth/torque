@@ -37,9 +37,11 @@ possible, are in [ARCHITECTURE.md](ARCHITECTURE.md).
 Requires Rust 1.92 or newer.
 
 ```sh
-cargo test --workspace     # the engine is covered by unit tests
-cargo run -p torque-gui    # the UI
-cargo run -p torque-cli    # headless: start tor, print bootstrap progress
+cargo test --workspace             # the engine is covered by unit tests
+cargo run -p torque-gui            # the UI
+cargo run -p torque-cli            # headless: start tor, print bootstrap progress
+cargo run -p torque-service        # the service
+cargo run -p torque-cli -- service status   # …and a client for it
 ```
 
 Running tor needs the Tor Expert Bundle unpacked into `vendor/` — see
@@ -58,7 +60,7 @@ repository.
 | `torque-ipc` | GUI ↔ service protocol |
 | `torque-service` | the privileged half: tor, routes, firewall filters |
 | `torque-gui` | the interface |
-| `torque-cli` | headless engine, for development |
+| `torque-cli` | headless engine and a service client, for development |
 
 ## Licence
 

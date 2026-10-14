@@ -2555,6 +2555,7 @@ dependencies = [
  "anyhow",
  "tokio",
  "torque-core",
+ "torque-ipc",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2601,6 +2602,7 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+ "tokio",
  "torque-policy",
 ]
 
@@ -2629,6 +2631,7 @@ dependencies = [
  "tokio",
  "torque-core",
  "torque-ipc",
+ "torque-policy",
  "tracing",
  "tracing-subscriber",
 ]

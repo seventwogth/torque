@@ -51,9 +51,19 @@ Transparent routing needs a TUN adapter, route changes and firewall filters.
 The GUI must not run elevated to get them, so the layout follows
 `wireguard-windows`: `torque-service` runs elevated (Windows service, systemd
 unit, launchd daemon) and owns tor plus the routing backend; `torque-gui` runs
-as the user and talks to it over a named pipe with an ACL, or a Unix socket
-with peer credentials checked. Tor surviving a closed window falls out of this
-for free.
+as the user and talks to it over a named pipe or a Unix socket. Tor surviving
+a closed window falls out of this for free.
+
+Several clients can be connected at once, so the service keeps tor in a single
+actor task and every request reaches it as a message carrying a `oneshot` for
+the reply. Request/response pairing therefore lives in one place instead of in
+each session.
+
+Access control on that endpoint is sequenced with elevation rather than
+bolted on early: today the service is unelevated and runs as the same user as
+the UI, so the endpoint's default security is already the right boundary — the
+same one as the user's own config file. An elevated service is a different
+problem, and stage 6 is where it is solved.
 
 ## How traffic reaches Tor
 
@@ -213,21 +223,31 @@ Stage numbers are referenced from `torque_router::Error::NotImplemented`.
    over the async seam described above. *Done.*
 3. **Bridges and transports** — editor, obfs4/snowflake/webtunnel, live
    `SETCONF` with no restart. *Done.*
-4. **Service** — IPC listener with an ACL, platform service registration,
-   supervision moves out of the GUI.
+4. **Service** — IPC transport and protocol, one actor owning tor, a client in
+   `torque-cli` to exercise it. *Done.* Supervision still also lives in the
+   UI; moving it behind the service is next. Two pieces were re-sequenced out
+   of this stage on purpose: the endpoint ACL belongs with elevation in stage
+   6, and registration as a platform service belongs with the installer in
+   stage 8 — see below.
 5. **Flow engine and ProxyBridge** — Wintun, userspace TCP/IP stack, `DNSPort`
    and `AutomapHostsOnResolve`, flow-to-process attribution, `torque-policy`
    evaluation, per-rule stream isolation, rules editor in the UI. Windows
    first. `torque-policy` itself has landed ahead of the engine that calls it,
    so the IPC protocol in stage 4 can carry rules from the start rather than
    versioning them in later.
-6. **Kill switch** — WFP filters, UDP and IPv6 blocked. Transparent mode may
-   only be called safe once this ships, and transparent-with-rules is labelled
-   separately from transparent-everything.
+6. **Kill switch and elevation** — WFP filters, UDP and IPv6 blocked, the
+   service running elevated, and with it the explicit endpoint ACL. Those two
+   go together: while the service is unelevated and runs as the same user as
+   the UI, the endpoint's default security already is the right boundary. An
+   elevated service has to grant a specific non-`SYSTEM` user instead, which
+   needs an SDDL and an installer that recorded who that user is. Transparent
+   mode may only be called safe once this ships, and transparent-with-rules is
+   labelled separately from transparent-everything.
 7. **Platform backends** — the flow engine on Linux and macOS, plus the
    optional native `TransPort` fast path for the no-rules case.
-8. **Packaging** — MSI installer, code signing, signature-verified updates for
-   the bundled tor binaries.
+8. **Packaging** — MSI installer, registration as a Windows service, a systemd
+   unit and a launchd daemon, code signing, signature-verified updates for the
+   bundled tor binaries.
 9. **Bridge acquisition** — `moat`, the domain-fronted BridgeDB API that Tor
    Browser uses, plus the circumvention-settings endpoint. Numbered last
    because it is independent, not because it is unimportant: a censored user

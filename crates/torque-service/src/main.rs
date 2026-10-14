@@ -1,26 +1,21 @@
 //! The privileged half of Torque.
 //!
-//! It owns everything that needs elevation — the TUN adapter, routes, firewall
-//! filters — plus the tor process itself, so the GUI can run as a normal user
-//! and survive being closed without taking Tor down.
+//! It owns tor and, from stage 5, everything that needs elevation: the TUN
+//! device, routes, firewall filters. Keeping it separate is what lets the UI
+//! run as a normal user and lets Tor survive the window being closed.
 //!
-//! Today it runs in the foreground and keeps the shared state the GUI will
-//! read. Still to come:
-//!   - stage 4: listen on `torque_ipc::endpoint()`, ACL the endpoint, and
-//!     serve `Request`/`Response`; register as a Windows service, a systemd
-//!     unit and a launchd daemon.
-//!   - stage 5/6: drive `torque_router` backends and refuse to report a kill
-//!     switch as active unless the backend actually installed one.
+//! Today it runs in the foreground and unelevated, which is enough for
+//! proxy-only mode — nothing it does yet requires privileges. Still to come:
+//!   - stage 5/6: drive `torque_router` backends, and with elevation, the
+//!     explicit endpoint ACL that an elevated service needs (see
+//!     `torque_ipc::transport`).
+//!   - stage 8: registration as a Windows service, a systemd unit and a
+//!     launchd daemon, so it starts without a terminal.
 
-use std::sync::Arc;
+mod actor;
+mod session;
 
 use anyhow::{Context, Result};
-use tokio::sync::RwLock;
-use torque_core::router::RoutingMode;
-use torque_core::{Engine, Layout, TorConfig, TorState, TransportPlugin};
-
-/// The snapshot the IPC layer will serve. Written by one task, read by many.
-type SharedState = Arc<RwLock<TorState>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,35 +26,58 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    let mut listener = torque_ipc::Listener::bind()
+        .await
+        .with_context(|| format!("binding {}", torque_ipc::endpoint()))?;
+
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         protocol = torque_ipc::PROTOCOL_VERSION,
         endpoint = %torque_ipc::endpoint(),
-        "torque service starting"
+        // Stated rather than assumed: this is the access boundary in force.
+        access = "the user running this service",
+        "torque service listening"
     );
 
-    let layout = Layout::discover().context("locating data and vendor directories")?;
-    let mut config = TorConfig::new(RoutingMode::ProxyOnly);
-    config.plugins = TransportPlugin::expert_bundle(&layout);
+    let jobs = actor::spawn();
 
-    let mut engine = Engine::start(&layout, &config)
-        .await
-        .context("starting tor")?;
-    let mut events = engine.take_events().expect("first caller takes the events");
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(connection) => {
+                    tracing::debug!("client connected");
+                    tokio::spawn(session::serve(connection, jobs.clone()));
+                }
+                Err(error) => tracing::warn!(%error, "rejecting a connection"),
+            },
 
-    let state: SharedState = Arc::new(RwLock::new(TorState::default()));
-    let writer = Arc::clone(&state);
-    let pump = tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            writer.write().await.apply(&event);
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("shutting down");
+                break;
+            }
         }
-        tracing::warn!("control event stream ended");
-    });
+    }
 
-    tokio::signal::ctrl_c().await.context("waiting for ctrl-c")?;
-    tracing::info!("shutting down");
-
-    pump.abort();
-    engine.shutdown().await.context("stopping tor")?;
+    stop_tor(&jobs).await;
+    // Dropping the mailbox ends the actor once the sessions holding clones
+    // are gone. Tor would exit anyway when this process does — TAKEOWNERSHIP
+    // ties its life to the control connection — but asking first means a
+    // clean exit rather than relying on that backstop.
+    drop(jobs);
     Ok(())
+}
+
+async fn stop_tor(jobs: &actor::Mailbox) {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if jobs
+        .send(actor::Job::Request(torque_ipc::Request::Stop, reply_tx))
+        .is_err()
+    {
+        return;
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(10), reply_rx).await {
+        Ok(Ok(_)) => tracing::info!("tor stopped"),
+        Ok(Err(_)) => {}
+        Err(_) => tracing::warn!("tor did not stop within 10s; exiting anyway"),
+    }
 }
