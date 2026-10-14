@@ -46,6 +46,14 @@ impl Status {
     }
 }
 
+/// The outcome of the last command, for things that are worth telling the
+/// user but do not change whether tor is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub error: bool,
+    pub text: String,
+}
+
 /// Everything the UI renders, as of the last change.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
@@ -53,15 +61,22 @@ pub struct Snapshot {
     pub state: TorState,
     pub tor_version: String,
     pub socks: Option<SocketAddr>,
+    /// The bridge set in effect, or the one the next start will use. The
+    /// worker owns this, so the UI has one source of truth rather than its
+    /// own copy that can drift.
+    pub bridges: Vec<String>,
+    pub notice: Option<Notice>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// Start tor. Bridge lines are passed as typed; invalid ones are dropped
-    /// with a log line, since the UI validates before sending.
-    Start { bridges: Vec<String> },
+    Start,
     Stop,
     NewIdentity,
+    /// Replace the bridge set: applied to a running tor without restarting
+    /// it, or remembered for the next start. Invalid lines are dropped with a
+    /// log line, since the UI validates before sending.
+    SetBridges { lines: Vec<String> },
 }
 
 /// Commands and forwarded control events share one mailbox.
@@ -136,6 +151,8 @@ struct Worker {
     state: TorState,
     tor_version: String,
     socks: Option<SocketAddr>,
+    bridges: Vec<String>,
+    notice: Option<Notice>,
     engine: Option<Engine>,
     forwarder: Option<JoinHandle<()>>,
     generation: u64,
@@ -155,6 +172,8 @@ impl Worker {
             state: TorState::default(),
             tor_version: String::new(),
             socks: None,
+            bridges: Vec::new(),
+            notice: None,
             engine: None,
             forwarder: None,
             generation: 0,
@@ -193,40 +212,91 @@ impl Worker {
 
     async fn handle(&mut self, command: Command) {
         match command {
-            Command::Start { bridges } => self.start(bridges).await,
+            Command::Start => self.start().await,
             Command::Stop => self.stop().await,
+            Command::SetBridges { lines } => self.set_bridges(lines).await,
             Command::NewIdentity => {
                 let Some(engine) = self.engine.as_ref() else {
                     return;
                 };
-                if let Err(error) = engine.control().new_identity().await {
-                    tracing::warn!(%error, "NEWNYM failed");
+                match engine.control().new_identity().await {
+                    Ok(()) => self.notify(false, "New identity requested."),
+                    Err(error) => self.notify(true, format!("NEWNYM failed: {error}")),
                 }
             }
         }
     }
 
-    async fn start(&mut self, bridge_lines: Vec<String>) {
+    /// Replaces the bridge set. Live when tor is running, so the user does not
+    /// have to restart to try a different transport.
+    async fn set_bridges(&mut self, lines: Vec<String>) {
+        self.bridges = lines;
+
+        let Some(engine) = self.engine.as_ref() else {
+            let message = if self.bridges.is_empty() {
+                "Bridges cleared; the next start will connect directly.".to_owned()
+            } else {
+                format!(
+                    "{} bridge(s) stored for the next start.",
+                    self.bridges.len()
+                )
+            };
+            return self.notify(false, message);
+        };
+
+        let layout = match Layout::discover() {
+            Ok(layout) => layout,
+            Err(error) => return self.notify(true, error.to_string()),
+        };
+        let config = self.config(&layout);
+
+        match engine.apply_bridges(&config).await {
+            // Deliberately not resetting the local bootstrap state: tor does
+            // not necessarily re-emit a bootstrap event here, and a progress
+            // bar reset to zero that never moves again is worse than one that
+            // keeps the last known value.
+            Ok(()) if config.bridges.is_empty() => {
+                self.notify(false, "Bridges disabled on the running tor.")
+            }
+            Ok(()) => self.notify(
+                false,
+                format!(
+                    "{} bridge(s) applied; tor is rebuilding circuits.",
+                    config.bridges.len()
+                ),
+            ),
+            Err(error) => self.notify(true, format!("could not apply bridges: {error}")),
+        }
+    }
+
+    /// The configuration implied by the worker's current bridge set.
+    fn config(&self, layout: &Layout) -> TorConfig {
+        let mut config = TorConfig::new(RoutingMode::ProxyOnly);
+        config.plugins = TransportPlugin::expert_bundle(layout);
+
+        let (bridges, errors) = parse_many(&self.bridges.join("\n"));
+        for (index, error) in &errors {
+            tracing::warn!("bridge line {}: {error}", index + 1);
+        }
+        config.bridges = bridges;
+        config
+    }
+
+    async fn start(&mut self) {
         if self.engine.is_some() || self.status.is_busy() {
             return;
         }
 
         self.status = Status::Starting;
         self.state = TorState::default();
+        self.notice = None;
         self.publish();
 
         let layout = match Layout::discover() {
             Ok(layout) => layout,
             Err(error) => return self.fail(error.to_string()),
         };
-
-        let mut config = TorConfig::new(RoutingMode::ProxyOnly);
-        config.plugins = TransportPlugin::expert_bundle(&layout);
-        let (bridges, errors) = parse_many(&bridge_lines.join("\n"));
-        for (index, error) in &errors {
-            tracing::warn!("bridge line {}: {error}", index + 1);
-        }
-        config.bridges = bridges;
+        let config = self.config(&layout);
 
         let mut engine = match Engine::start(&layout, &config).await {
             Ok(engine) => engine,
@@ -272,6 +342,9 @@ impl Worker {
         self.state = TorState::default();
         self.tor_version.clear();
         self.socks = None;
+        // The bridge set survives a stop — it is the user's configuration,
+        // not part of the session.
+        self.notice = None;
         self.publish();
     }
 
@@ -281,12 +354,23 @@ impl Worker {
         self.publish();
     }
 
+    fn notify(&mut self, error: bool, text: impl Into<String>) {
+        let text = text.into();
+        if error {
+            tracing::warn!("{text}");
+        }
+        self.notice = Some(Notice { error, text });
+        self.publish();
+    }
+
     fn publish(&self) {
         let _ = self.snapshot.send(Snapshot {
             status: self.status.clone(),
             state: self.state.clone(),
             tor_version: self.tor_version.clone(),
             socks: self.socks,
+            bridges: self.bridges.clone(),
+            notice: self.notice.clone(),
         });
         self.ctx.request_repaint();
     }

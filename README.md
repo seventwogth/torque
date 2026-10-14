@@ -7,10 +7,11 @@ in a window instead of a torrc file.
 Windows first, cross-platform by design. Rust, with an egui interface and a
 bundled C-tor driven over its control protocol.
 
-> **Status: early.** The engine works and is tested; the UI renders a
-> disconnected state. Transparent routing is not implemented — see the
-> roadmap in [ARCHITECTURE.md](ARCHITECTURE.md). Do not rely on this for
-> anything that matters yet.
+> **Status: early.** Usable as a SOCKS proxy client: it starts and stops tor,
+> shows bootstrap, circuits and bandwidth live, and switches bridges and
+> transports without a restart. Transparent routing and per-app rules are not
+> implemented — see the roadmap in [ARCHITECTURE.md](ARCHITECTURE.md). Do not
+> rely on this for anything that matters yet.
 
 ## What it is meant to do
 

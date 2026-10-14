@@ -39,11 +39,8 @@ impl Engine {
         if !tor.exists() {
             return Err(Error::MissingBinary(tor));
         }
-        for plugin in config.needed_plugins() {
-            if !plugin.executable.exists() {
-                return Err(Error::MissingBinary(plugin.executable.clone()));
-            }
-        }
+
+        ensure_plugins_present(config)?;
 
         layout.ensure_data_dir().await?;
         tokio::fs::write(layout.torrc(), config.render(layout)).await?;
@@ -110,6 +107,33 @@ impl Engine {
         self.events.take()
     }
 
+    /// Switches the running tor onto a new bridge set without restarting it.
+    ///
+    /// Tor re-bootstraps on its own afterwards. Two things are worth knowing:
+    /// the transport binaries must exist *before* the switch, because tor only
+    /// reports the failure in its log; and tor will not re-exec a transport it
+    /// has already launched, so changing the executable behind a transport
+    /// already in use needs a restart rather than this call. Switching to a
+    /// different transport, or changing bridge lines, works live.
+    pub async fn apply_bridges(&self, config: &TorConfig) -> Result<()> {
+        ensure_plugins_present(config)?;
+
+        let settings = config.bridge_settings();
+        if settings.is_empty() {
+            self.control.reset_conf(&TorConfig::BRIDGE_KEYS).await?;
+            tracing::info!("bridges disabled");
+            return Ok(());
+        }
+
+        let pairs: Vec<(&str, &str)> = settings
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        self.control.set_conf(&pairs).await?;
+        tracing::info!(bridges = config.bridges.len(), "bridges applied live");
+        Ok(())
+    }
+
     /// Asks tor to exit, then waits for it.
     pub async fn shutdown(mut self) -> Result<()> {
         if let Err(error) = self.control.signal("HALT").await {
@@ -120,6 +144,17 @@ impl Engine {
         tracing::info!(?status, "tor exited");
         Ok(())
     }
+}
+
+/// Tor reports a missing transport binary only in its log, long after the
+/// command succeeded, so check before handing it a plugin line.
+fn ensure_plugins_present(config: &TorConfig) -> Result<()> {
+    for plugin in config.needed_plugins() {
+        if !plugin.executable.exists() {
+            return Err(Error::MissingBinary(plugin.executable.clone()));
+        }
+    }
+    Ok(())
 }
 
 async fn wait_for_control_port(layout: &Layout, child: &mut Child) -> Result<SocketAddr> {

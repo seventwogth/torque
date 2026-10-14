@@ -194,10 +194,10 @@ Stage numbers are referenced from `torque_router::Error::NotImplemented`.
 
 1. **Engine** — control-protocol client, supervisor, torrc generation.
    `torque-cli` starts tor and reports bootstrap. *Done.*
-2. **UI** — bootstrap, circuit list, bandwidth graph, new identity, SOCKS mode.
-   *Bridge validation done; panels render a disconnected state.*
+2. **UI** — bootstrap, circuit list, bandwidth graph, new identity, SOCKS mode,
+   over the async seam described above. *Done.*
 3. **Bridges and transports** — editor, obfs4/snowflake/webtunnel, live
-   `SETCONF`, `moat`/BridgeDB fetch.
+   `SETCONF` with no restart. *Done.*
 4. **Service** — IPC listener with an ACL, platform service registration,
    supervision moves out of the GUI.
 5. **Flow engine and ProxyBridge** — Wintun, userspace TCP/IP stack, `DNSPort`
@@ -212,6 +212,16 @@ Stage numbers are referenced from `torque_router::Error::NotImplemented`.
    optional native `TransPort` fast path for the no-rules case.
 8. **Packaging** — MSI installer, code signing, signature-verified updates for
    the bundled tor binaries.
+9. **Bridge acquisition** — `moat`, the domain-fronted BridgeDB API that Tor
+   Browser uses, plus the circumvention-settings endpoint. Numbered last
+   because it is independent, not because it is unimportant: a censored user
+   cannot reach BridgeDB in a browser either. It is a different kind of work
+   from stage 3 — an HTTPS client behind a CDN front and a CAPTCHA the user
+   has to solve — and it buys nothing until the bridges it returns can be
+   applied, which is what stage 3 delivered. Can land whenever.
+
+Stages 5 and 7 are referenced from `torque_router::Error::NotImplemented`, so
+new work gets appended rather than inserted.
 
 ## Known risks
 

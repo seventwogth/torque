@@ -46,9 +46,6 @@ pub struct TorqueApp {
     routing: RoutingMode,
     bridge_input: String,
     bridge_result: Option<BridgeValidation>,
-    /// Bridge lines accepted by the editor, used by the next start. Applying
-    /// them to a running tor without a restart is stage 3.
-    bridges_for_next_start: Vec<String>,
 }
 
 impl TorqueApp {
@@ -59,7 +56,6 @@ impl TorqueApp {
             routing: RoutingMode::ProxyOnly,
             bridge_input: String::new(),
             bridge_result: None,
-            bridges_for_next_start: Vec::new(),
         }
     }
 }
@@ -171,9 +167,7 @@ impl TorqueApp {
             let running = snapshot.status.is_running();
             ui.add_enabled_ui(!running && !snapshot.status.is_busy(), |ui| {
                 if ui.button("Start").clicked() {
-                    self.link.send(Command::Start {
-                        bridges: self.bridges_for_next_start.clone(),
-                    });
+                    self.link.send(Command::Start);
                 }
             });
             ui.add_enabled_ui(running, |ui| {
@@ -186,9 +180,18 @@ impl TorqueApp {
             });
         });
 
+        notice(ui, snapshot);
+
         if !snapshot.tor_version.is_empty() {
             ui.add_space(8.0);
             ui.label(RichText::new(format!("tor {}", snapshot.tor_version)).weak());
+        }
+
+        if !snapshot.bridges.is_empty() {
+            ui.label(
+                RichText::new(format!("via {} bridge(s)", snapshot.bridges.len()))
+                    .weak(),
+            );
         }
 
         ui.add_space(16.0);
@@ -287,33 +290,51 @@ impl TorqueApp {
                 .as_ref()
                 .is_some_and(|result| !result.bridges.is_empty());
             ui.add_enabled_ui(usable, |ui| {
-                if ui.button("Use these bridges").clicked()
+                let label = if snapshot.status.is_running() {
+                    "Apply now"
+                } else {
+                    "Use on next start"
+                };
+                if ui.button(label).clicked()
                     && let Some(result) = &self.bridge_result
                 {
-                    self.bridges_for_next_start = result
-                        .bridges
-                        .iter()
-                        .map(BridgeLine::to_bridge_value)
-                        .collect();
+                    self.link.send(Command::SetBridges {
+                        lines: result
+                            .bridges
+                            .iter()
+                            .map(BridgeLine::to_bridge_value)
+                            .collect(),
+                    });
+                }
+            });
+
+            ui.add_enabled_ui(!snapshot.bridges.is_empty(), |ui| {
+                if ui.button("Clear").clicked() {
+                    self.link.send(Command::SetBridges { lines: Vec::new() });
                 }
             });
         });
 
-        if !self.bridges_for_next_start.is_empty() {
-            ui.add_space(4.0);
-            let note = if snapshot.status.is_running() {
-                format!(
-                    "{} bridge(s) stored \u{2014} restart tor to use them. \
-                     Applying them live is stage 3.",
-                    self.bridges_for_next_start.len()
-                )
-            } else {
-                format!(
-                    "{} bridge(s) will be used on the next start.",
-                    self.bridges_for_next_start.len()
-                )
-            };
-            ui.label(RichText::new(note).weak());
+        if snapshot.status.is_running() {
+            ui.label(
+                RichText::new("Applying switches the running tor over; no restart needed.")
+                    .small()
+                    .weak(),
+            );
+        }
+
+        notice(ui, snapshot);
+
+        if !snapshot.bridges.is_empty() {
+            ui.add_space(8.0);
+            ui.label(format!("In use: {} bridge(s)", snapshot.bridges.len()));
+            egui::ScrollArea::vertical()
+                .max_height(90.0)
+                .show(ui, |ui| {
+                    for line in &snapshot.bridges {
+                        ui.label(RichText::new(line).monospace().small().weak());
+                    }
+                });
         }
 
         if let Some(result) = &self.bridge_result {
@@ -411,6 +432,19 @@ impl TorqueApp {
                     ui.label(format!("{:?}  {}", entry.level, entry.message));
                 }
             });
+    }
+}
+
+/// The outcome of the last command, where the user just clicked.
+fn notice(ui: &mut Ui, snapshot: &Snapshot) {
+    let Some(notice) = &snapshot.notice else {
+        return;
+    };
+    ui.add_space(8.0);
+    if notice.error {
+        ui.colored_label(BAD, &notice.text);
+    } else {
+        ui.label(RichText::new(&notice.text).weak());
     }
 }
 

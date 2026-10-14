@@ -40,17 +40,23 @@ impl TransportPlugin {
         ]
     }
 
-    fn render(&self) -> String {
-        let mut line = format!(
-            "ClientTransportPlugin {} exec {}",
+    /// The value of a `ClientTransportPlugin` option, without the option name,
+    /// so the same rendering serves torrc and `SETCONF`.
+    pub fn transport_plugin_value(&self) -> String {
+        let mut value = format!(
+            "{} exec {}",
             self.transports.join(","),
             torrc_path(&self.executable)
         );
         for arg in &self.args {
-            line.push(' ');
-            line.push_str(arg);
+            value.push(' ');
+            value.push_str(arg);
         }
-        line
+        value
+    }
+
+    fn render(&self) -> String {
+        format!("ClientTransportPlugin {}", self.transport_plugin_value())
     }
 }
 
@@ -101,6 +107,36 @@ impl TorConfig {
             })
             .collect()
     }
+
+    /// The `SETCONF` pairs that switch a running tor onto this bridge set.
+    ///
+    /// Empty when there are no bridges — the caller should `RESETCONF`
+    /// [`Self::BRIDGE_KEYS`] instead, since an empty `Bridge` list with
+    /// `UseBridges 1` is rejected.
+    ///
+    /// Repeating `Bridge` is deliberate: that is how tor takes a list. One
+    /// `SETCONF` is atomic, so `UseBridges` and the bridges it requires are
+    /// sent together and tor never sees the invalid intermediate state.
+    pub fn bridge_settings(&self) -> Vec<(String, String)> {
+        if self.bridges.is_empty() {
+            return Vec::new();
+        }
+
+        let mut settings = vec![("UseBridges".to_owned(), "1".to_owned())];
+        for plugin in self.needed_plugins() {
+            settings.push((
+                "ClientTransportPlugin".to_owned(),
+                plugin.transport_plugin_value(),
+            ));
+        }
+        for bridge in &self.bridges {
+            settings.push(("Bridge".to_owned(), bridge.to_bridge_value()));
+        }
+        settings
+    }
+
+    /// Options to reset when turning bridges off.
+    pub const BRIDGE_KEYS: [&'static str; 3] = ["UseBridges", "Bridge", "ClientTransportPlugin"];
 
     pub fn render(&self, layout: &Layout) -> String {
         let mut lines = vec![
@@ -227,6 +263,61 @@ mod tests {
         let rendered = config.render(&layout);
         assert!(rendered.contains("UseBridges 1"));
         assert!(!rendered.contains("ClientTransportPlugin"));
+    }
+
+    #[test]
+    fn bridge_settings_repeat_the_bridge_key() {
+        let layout = layout();
+        let (bridges, errors) = torque_bridges::parse_many(&format!(
+            "obfs4 192.0.2.1:443 {FINGERPRINT} cert=x iat-mode=0\n\
+             obfs4 192.0.2.2:443 {FINGERPRINT} cert=y iat-mode=0\n"
+        ));
+        assert!(errors.is_empty());
+
+        let mut config = TorConfig::new(RoutingMode::ProxyOnly).with_bridges(bridges);
+        config.plugins = TransportPlugin::expert_bundle(&layout);
+        let settings = config.bridge_settings();
+
+        assert_eq!(settings[0], ("UseBridges".to_owned(), "1".to_owned()));
+        assert_eq!(
+            settings
+                .iter()
+                .filter(|(key, _)| key == "Bridge")
+                .count(),
+            2
+        );
+        let plugins: Vec<_> = settings
+            .iter()
+            .filter(|(key, _)| key == "ClientTransportPlugin")
+            .collect();
+        assert_eq!(plugins.len(), 1);
+        assert!(plugins[0].1.starts_with("obfs4,meek_lite,webtunnel exec "));
+    }
+
+    #[test]
+    fn vanilla_bridges_need_no_transport_plugin_setting() {
+        let layout = layout();
+        let bridge: BridgeLine = format!("192.0.2.7:9001 {FINGERPRINT}")
+            .parse()
+            .expect("valid bridge");
+        let mut config = TorConfig::new(RoutingMode::ProxyOnly).with_bridges(vec![bridge]);
+        config.plugins = TransportPlugin::expert_bundle(&layout);
+
+        let settings = config.bridge_settings();
+        assert!(!settings.iter().any(|(key, _)| key == "ClientTransportPlugin"));
+        assert_eq!(settings.iter().filter(|(key, _)| key == "Bridge").count(), 1);
+    }
+
+    #[test]
+    fn no_bridges_means_reset_not_an_empty_list() {
+        // UseBridges 1 with an empty Bridge list is rejected by tor, so the
+        // caller has to RESETCONF instead of sending nothing.
+        assert!(
+            TorConfig::new(RoutingMode::ProxyOnly)
+                .bridge_settings()
+                .is_empty()
+        );
+        assert!(TorConfig::BRIDGE_KEYS.contains(&"UseBridges"));
     }
 
     #[test]

@@ -94,8 +94,18 @@ impl ControlClient {
             .ok_or_else(|| Error::Protocol(format!("GETINFO {key} returned no value")))
     }
 
+    /// Reads configuration back. Repeated options (`Bridge`) come back as one
+    /// reply line each, so use [`Reply::lines`] rather than [`Reply::value`].
+    pub async fn get_conf(&self, key: &str) -> Result<Reply> {
+        self.command(&format!("GETCONF {key}")).await
+    }
+
     /// Applies configuration without restarting tor — how bridges and
     /// transports get switched live.
+    ///
+    /// Repeating a key is how a list-valued option is set: tor takes
+    /// `Bridge="a" Bridge="b"` as the whole list. One `SETCONF` is atomic, so
+    /// `UseBridges=1` can be sent together with the bridges it requires.
     pub async fn set_conf(&self, settings: &[(&str, &str)]) -> Result<()> {
         if settings.is_empty() {
             return Ok(());
