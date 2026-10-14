@@ -1,0 +1,22 @@
+[package]
+name = "torque-service"
+description = "Privileged Torque service: owns tor and the routing backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "torque-service"
+path = "src/main.rs"
+
+[dependencies]
+torque-core.workspace = true
+torque-ipc.workspace = true
+
+anyhow.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

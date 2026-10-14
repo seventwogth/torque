@@ -1,0 +1,21 @@
+[package]
+name = "torque-cli"
+description = "Headless Torque: starts tor and reports what the GUI would show"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "torque-cli"
+path = "src/main.rs"
+
+[dependencies]
+torque-core.workspace = true
+
+anyhow.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

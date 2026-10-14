@@ -1,0 +1,19 @@
+[package]
+name = "torque-core"
+description = "Tor process supervision, configuration and state model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+torque-bridges.workspace = true
+torque-control.workspace = true
+torque-router.workspace = true
+
+directories.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
+tracing.workspace = true

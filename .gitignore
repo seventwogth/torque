@@ -1,0 +1,6 @@
+/target
+*.pdb
+
+# Bundled Tor binaries are fetched from the Tor Expert Bundle, never committed.
+/vendor/*
+!/vendor/README.md

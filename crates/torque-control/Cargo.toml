@@ -1,0 +1,15 @@
+[package]
+name = "torque-control"
+description = "Async client for the Tor control protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+hex.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "sync"] }
+tracing.workspace = true
