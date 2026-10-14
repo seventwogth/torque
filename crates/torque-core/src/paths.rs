@@ -59,16 +59,24 @@ impl Layout {
     }
 }
 
+/// Name of the environment variable that overrides vendor discovery.
+pub const VENDOR_DIR_ENV: &str = "TORQUE_VENDOR_DIR";
+
 fn vendor_dir_next_to_executable() -> Result<PathBuf> {
-    // Falls back to ./vendor so `cargo run` works from a checkout.
-    let fallback = PathBuf::from("vendor");
-    let Ok(exe) = std::env::current_exe() else {
-        return Ok(fallback);
-    };
-    Ok(exe
-        .parent()
-        .map(|dir| dir.join("vendor"))
-        .unwrap_or(fallback))
+    if let Some(explicit) = std::env::var_os(VENDOR_DIR_ENV) {
+        return Ok(PathBuf::from(explicit));
+    }
+
+    // Installed layout: vendor/ sits beside the executable.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(beside_exe) = exe.parent().map(|dir| dir.join("vendor"))
+        && beside_exe.is_dir()
+    {
+        return Ok(beside_exe);
+    }
+
+    // Checkout layout: ./vendor, so `cargo run` works without an install.
+    Ok(PathBuf::from("vendor"))
 }
 
 pub fn executable_name(stem: &str) -> String {

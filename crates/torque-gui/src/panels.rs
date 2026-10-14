@@ -1,7 +1,15 @@
 use egui::{Color32, RichText, Ui};
-use torque_core::TorState;
 use torque_core::bridges::{BridgeLine, ParseError, parse_many, required_transports};
+use torque_core::format::{human_rate, relay_nickname};
 use torque_ipc::RoutingMode;
+
+use crate::link::{Command, EngineLink, Snapshot, Status};
+
+const WARN: Color32 = Color32::from_rgb(0xc0, 0x6b, 0x2a);
+const BAD: Color32 = Color32::from_rgb(0xd6, 0x4a, 0x4a);
+const GOOD: Color32 = Color32::from_rgb(0x3f, 0xb9, 0x50);
+const READ: Color32 = Color32::from_rgb(0x4c, 0x9b, 0xe8);
+const WRITTEN: Color32 = Color32::from_rgb(0xd1, 0x8c, 0x3c);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -33,24 +41,25 @@ impl Tab {
 }
 
 pub struct TorqueApp {
+    link: EngineLink,
     tab: Tab,
-    /// Last snapshot from the service. Default until stage 4 wires the IPC.
-    state: TorState,
-    connected: bool,
     routing: RoutingMode,
     bridge_input: String,
     bridge_result: Option<BridgeValidation>,
+    /// Bridge lines accepted by the editor, used by the next start. Applying
+    /// them to a running tor without a restart is stage 3.
+    bridges_for_next_start: Vec<String>,
 }
 
-impl Default for TorqueApp {
-    fn default() -> Self {
+impl TorqueApp {
+    pub fn new(ctx: &egui::Context) -> Self {
         Self {
+            link: EngineLink::spawn(ctx.clone()),
             tab: Tab::Status,
-            state: TorState::default(),
-            connected: false,
             routing: RoutingMode::ProxyOnly,
             bridge_input: String::new(),
             bridge_result: None,
+            bridges_for_next_start: Vec::new(),
         }
     }
 }
@@ -63,6 +72,8 @@ struct BridgeValidation {
 
 impl eframe::App for TorqueApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let snapshot = self.link.snapshot();
+
         egui::Panel::left("nav")
             .exact_size(150.0)
             .resizable(false)
@@ -85,10 +96,11 @@ impl eframe::App for TorqueApp {
 
         egui::Panel::bottom("status-bar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let (color, text) = if self.connected {
-                    (Color32::from_rgb(0x3f, 0xb9, 0x50), "service connected")
-                } else {
-                    (Color32::from_rgb(0xc0, 0x6b, 0x2a), "service not connected")
+                let (color, text) = match &snapshot.status {
+                    Status::Running => (GOOD, "running".to_owned()),
+                    Status::Starting => (WARN, "starting".to_owned()),
+                    Status::Disconnected => (ui.visuals().weak_text_color(), "stopped".to_owned()),
+                    Status::Failed(_) => (BAD, "failed".to_owned()),
                 };
                 ui.colored_label(color, "\u{25cf}");
                 ui.label(text);
@@ -97,108 +109,114 @@ impl eframe::App for TorqueApp {
                     RoutingMode::ProxyOnly => "proxy only",
                     RoutingMode::Transparent => "transparent (not active)",
                 });
+                if let Some(socks) = snapshot.socks {
+                    ui.separator();
+                    ui.label(format!("socks {socks}"));
+                }
             });
         });
 
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
-            Tab::Status => self.status_panel(ui),
-            Tab::Circuits => self.circuits_panel(ui),
-            Tab::Bridges => self.bridges_panel(ui),
+            Tab::Status => self.status_panel(ui, &snapshot),
+            Tab::Circuits => self.circuits_panel(ui, &snapshot),
+            Tab::Bridges => self.bridges_panel(ui, &snapshot),
             Tab::Routing => self.routing_panel(ui),
-            Tab::Log => self.log_panel(ui),
+            Tab::Log => self.log_panel(ui, &snapshot),
         });
     }
 }
 
 impl TorqueApp {
-    fn status_panel(&mut self, ui: &mut Ui) {
+    fn status_panel(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
         ui.heading("Status");
         ui.add_space(8.0);
 
-        let bootstrap = &self.state.bootstrap;
-        let fraction = f32::from(bootstrap.progress) / 100.0;
+        let bootstrap = &snapshot.state.bootstrap;
         ui.add(
-            egui::ProgressBar::new(fraction)
+            egui::ProgressBar::new(f32::from(bootstrap.progress) / 100.0)
                 .show_percentage()
                 .desired_height(18.0),
         );
-        ui.label(if bootstrap.summary.is_empty() {
-            "not started".to_owned()
-        } else {
-            bootstrap.summary.clone()
-        });
 
-        ui.add_space(16.0);
         ui.horizontal(|ui| {
-            // Not wired until the service exists; shown disabled rather than
-            // hidden so the eventual shape of the UI is visible.
-            ui.add_enabled_ui(self.connected, |ui| {
-                let _ = ui.button("Connect");
-                let _ = ui.button("New identity");
+            if snapshot.status.is_busy() {
+                ui.spinner();
+            }
+            ui.label(match &snapshot.status {
+                Status::Disconnected => "not started".to_owned(),
+                Status::Starting if bootstrap.summary.is_empty() => "launching tor".to_owned(),
+                _ if !bootstrap.summary.is_empty() => bootstrap.summary.clone(),
+                Status::Running => "connected".to_owned(),
+                Status::Starting => "launching tor".to_owned(),
+                Status::Failed(_) => String::new(),
             });
         });
 
-        ui.add_space(16.0);
-        let sample = self.state.latest_bandwidth();
-        ui.label(format!(
-            "down {}   up {}",
-            human_bytes(sample.read),
-            human_bytes(sample.written)
-        ));
-        ui.add_space(4.0);
-        self.bandwidth_graph(ui);
-    }
-
-    /// Hand-drawn so the initial build carries no plotting dependency; swap in
-    /// `egui_plot` once there is real data worth zooming into.
-    fn bandwidth_graph(&self, ui: &mut Ui) {
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), 96.0),
-            egui::Sense::hover(),
-        );
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
-
-        let samples = &self.state.bandwidth;
-        if samples.is_empty() {
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "no traffic yet",
-                egui::FontId::proportional(12.0),
-                ui.visuals().weak_text_color(),
-            );
-            return;
+        if let Status::Failed(message) = &snapshot.status {
+            ui.add_space(8.0);
+            ui.colored_label(BAD, message);
+            if message.contains("vendor") || message.contains("Expert Bundle") {
+                ui.label(
+                    RichText::new(
+                        "Unpack the Tor Expert Bundle into vendor/, or point \
+                         TORQUE_VENDOR_DIR at it.",
+                    )
+                    .weak(),
+                );
+            }
         }
 
-        let peak = samples
-            .iter()
-            .map(|sample| sample.read.max(sample.written))
-            .max()
-            .unwrap_or(1)
-            .max(1) as f32;
-        let step = rect.width() / torque_core::state::BANDWIDTH_HISTORY as f32;
+        ui.add_space(16.0);
+        ui.horizontal(|ui| {
+            let running = snapshot.status.is_running();
+            ui.add_enabled_ui(!running && !snapshot.status.is_busy(), |ui| {
+                if ui.button("Start").clicked() {
+                    self.link.send(Command::Start {
+                        bridges: self.bridges_for_next_start.clone(),
+                    });
+                }
+            });
+            ui.add_enabled_ui(running, |ui| {
+                if ui.button("Stop").clicked() {
+                    self.link.send(Command::Stop);
+                }
+                if ui.button("New identity").clicked() {
+                    self.link.send(Command::NewIdentity);
+                }
+            });
+        });
 
-        let draw = |pick: fn(&torque_core::state::BandwidthSample) -> u64, color: Color32| {
-            let stroke = egui::Stroke::new(1.5, color);
-            for (index, pair) in samples.iter().collect::<Vec<_>>().windows(2).enumerate() {
-                let y = |value: u64| rect.bottom() - (value as f32 / peak) * rect.height() * 0.92;
-                let from = egui::pos2(rect.left() + index as f32 * step, y(pick(pair[0])));
-                let to = egui::pos2(rect.left() + (index + 1) as f32 * step, y(pick(pair[1])));
-                painter.line_segment([from, to], stroke);
-            }
-        };
+        if !snapshot.tor_version.is_empty() {
+            ui.add_space(8.0);
+            ui.label(RichText::new(format!("tor {}", snapshot.tor_version)).weak());
+        }
 
-        draw(|sample| sample.read, Color32::from_rgb(0x4c, 0x9b, 0xe8));
-        draw(|sample| sample.written, Color32::from_rgb(0xd1, 0x8c, 0x3c));
+        ui.add_space(16.0);
+        let sample = snapshot.state.latest_bandwidth();
+        ui.horizontal(|ui| {
+            ui.colored_label(READ, "\u{25bc}");
+            ui.label(human_rate(sample.read));
+            ui.add_space(12.0);
+            ui.colored_label(WRITTEN, "\u{25b2}");
+            ui.label(human_rate(sample.written));
+        });
+        ui.add_space(4.0);
+        bandwidth_graph(ui, snapshot);
     }
 
-    fn circuits_panel(&mut self, ui: &mut Ui) {
+    fn circuits_panel(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
         ui.heading("Circuits");
         ui.add_space(8.0);
 
-        if self.state.circuits.is_empty() {
-            ui.label(RichText::new("No circuits. Tor is not running.").weak());
+        if snapshot.state.circuits.is_empty() {
+            ui.label(
+                RichText::new(if snapshot.status.is_running() {
+                    "No circuits yet."
+                } else {
+                    "No circuits. Tor is not running."
+                })
+                .weak(),
+            );
             return;
         }
 
@@ -213,18 +231,36 @@ impl TorqueApp {
                     ui.label(RichText::new("Streams").strong());
                     ui.end_row();
 
-                    for circuit in self.state.circuits.values() {
+                    for circuit in snapshot.state.circuits.values() {
                         ui.label(&circuit.id);
                         ui.label(&circuit.status);
-                        ui.label(circuit.path.join(" \u{2192} "));
-                        ui.label(circuit.streams.len().to_string());
+                        ui.label(
+                            circuit
+                                .path
+                                .iter()
+                                .map(|hop| relay_nickname(hop))
+                                .collect::<Vec<_>>()
+                                .join(" \u{2192} "),
+                        );
+                        // The targets are what makes a circuit legible: which
+                        // of them is carrying what.
+                        ui.label(if circuit.streams.is_empty() {
+                            "\u{2014}".to_owned()
+                        } else {
+                            circuit
+                                .streams
+                                .values()
+                                .map(String::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        });
                         ui.end_row();
                     }
                 });
         });
     }
 
-    fn bridges_panel(&mut self, ui: &mut Ui) {
+    fn bridges_panel(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
         ui.heading("Bridges");
         ui.label(
             RichText::new("One bridge line per line, as given by BridgeDB. `#` starts a comment.")
@@ -241,14 +277,43 @@ impl TorqueApp {
         );
 
         ui.add_space(8.0);
-        if ui.button("Validate").clicked() {
-            let (bridges, errors) = parse_many(&self.bridge_input);
-            let transports = required_transports(&bridges);
-            self.bridge_result = Some(BridgeValidation {
-                bridges,
-                errors,
-                transports,
+        ui.horizontal(|ui| {
+            if ui.button("Validate").clicked() {
+                self.validate_bridges();
+            }
+
+            let usable = self
+                .bridge_result
+                .as_ref()
+                .is_some_and(|result| !result.bridges.is_empty());
+            ui.add_enabled_ui(usable, |ui| {
+                if ui.button("Use these bridges").clicked()
+                    && let Some(result) = &self.bridge_result
+                {
+                    self.bridges_for_next_start = result
+                        .bridges
+                        .iter()
+                        .map(BridgeLine::to_bridge_value)
+                        .collect();
+                }
             });
+        });
+
+        if !self.bridges_for_next_start.is_empty() {
+            ui.add_space(4.0);
+            let note = if snapshot.status.is_running() {
+                format!(
+                    "{} bridge(s) stored \u{2014} restart tor to use them. \
+                     Applying them live is stage 3.",
+                    self.bridges_for_next_start.len()
+                )
+            } else {
+                format!(
+                    "{} bridge(s) will be used on the next start.",
+                    self.bridges_for_next_start.len()
+                )
+            };
+            ui.label(RichText::new(note).weak());
         }
 
         if let Some(result) = &self.bridge_result {
@@ -260,10 +325,7 @@ impl TorqueApp {
             ));
 
             for (index, error) in &result.errors {
-                ui.colored_label(
-                    Color32::from_rgb(0xd6, 0x4a, 0x4a),
-                    format!("line {}: {error}", index + 1),
-                );
+                ui.colored_label(BAD, format!("line {}: {error}", index + 1));
             }
 
             let unauthenticated = result
@@ -273,7 +335,7 @@ impl TorqueApp {
                 .count();
             if unauthenticated > 0 {
                 ui.colored_label(
-                    Color32::from_rgb(0xc0, 0x6b, 0x2a),
+                    WARN,
                     format!(
                         "{unauthenticated} bridge(s) carry no fingerprint, so the relay's \
                          identity cannot be verified"
@@ -288,6 +350,16 @@ impl TorqueApp {
                 ));
             }
         }
+    }
+
+    fn validate_bridges(&mut self) {
+        let (bridges, errors) = parse_many(&self.bridge_input);
+        let transports = required_transports(&bridges);
+        self.bridge_result = Some(BridgeValidation {
+            bridges,
+            errors,
+            transports,
+        });
     }
 
     fn routing_panel(&mut self, ui: &mut Ui) {
@@ -308,7 +380,7 @@ impl TorqueApp {
         if self.routing == RoutingMode::Transparent {
             ui.add_space(12.0);
             ui.colored_label(
-                Color32::from_rgb(0xc0, 0x6b, 0x2a),
+                WARN,
                 "Experimental: the kill switch is not implemented yet, so traffic can still \
                  leave outside Tor. Do not rely on this mode.",
             );
@@ -323,11 +395,11 @@ impl TorqueApp {
         }
     }
 
-    fn log_panel(&mut self, ui: &mut Ui) {
+    fn log_panel(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
         ui.heading("Log");
         ui.add_space(8.0);
 
-        if self.state.log.is_empty() {
+        if snapshot.state.log.is_empty() {
             ui.label(RichText::new("Nothing logged yet.").weak());
             return;
         }
@@ -335,24 +407,52 @@ impl TorqueApp {
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                for entry in &self.state.log {
+                for entry in &snapshot.state.log {
                     ui.label(format!("{:?}  {}", entry.level, entry.message));
                 }
             });
     }
 }
 
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B/s", "KiB/s", "MiB/s", "GiB/s"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
+/// Hand-drawn so the initial build carries no plotting dependency; swap in
+/// `egui_plot` once there is real data worth zooming into.
+fn bandwidth_graph(ui: &mut Ui, snapshot: &Snapshot) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 96.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+
+    let samples = &snapshot.state.bandwidth;
+    if samples.is_empty() {
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "no traffic yet",
+            egui::FontId::proportional(12.0),
+            ui.visuals().weak_text_color(),
+        );
+        return;
     }
-    if unit == 0 {
-        format!("{bytes} B/s")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
+
+    let peak = samples
+        .iter()
+        .map(|sample| sample.read.max(sample.written))
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let step = rect.width() / torque_core::state::BANDWIDTH_HISTORY as f32;
+    let points: Vec<_> = samples.iter().collect();
+
+    let draw = |pick: fn(&torque_core::state::BandwidthSample) -> u64, color: Color32| {
+        let stroke = egui::Stroke::new(1.5, color);
+        for (index, pair) in points.windows(2).enumerate() {
+            let y = |value: u64| rect.bottom() - (value as f32 / peak) * rect.height() * 0.92;
+            let from = egui::pos2(rect.left() + index as f32 * step, y(pick(pair[0])));
+            let to = egui::pos2(rect.left() + (index + 1) as f32 * step, y(pick(pair[1])));
+            painter.line_segment([from, to], stroke);
+        }
+    };
+
+    draw(|sample| sample.read, READ);
+    draw(|sample| sample.written, WRITTEN);
 }

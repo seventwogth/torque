@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use torque_core::bridges::parse_many;
 use torque_core::control::Event;
+use torque_core::format::human_rate;
 use torque_core::router::RoutingMode;
 use torque_core::{Engine, Layout, TorConfig, TorState, TransportPlugin};
 
@@ -79,8 +80,8 @@ async fn main() -> Result<()> {
                     Event::Bandwidth { read, written } if bootstrapped => {
                         println!(
                             "down {:>8} up {:>8}   circuits {}",
-                            human_bytes(*read),
-                            human_bytes(*written),
+                            human_rate(*read),
+                            human_rate(*written),
                             state.built_circuits().count(),
                         );
                     }
@@ -100,19 +101,4 @@ async fn main() -> Result<()> {
 
     engine.shutdown().await.context("stopping tor")?;
     Ok(())
-}
-
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B/s", "KiB/s", "MiB/s", "GiB/s"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} {}", UNITS[0])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }

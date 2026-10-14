@@ -6,6 +6,7 @@
 
 mod engine;
 mod error;
+pub mod format;
 pub mod paths;
 pub mod state;
 pub mod torrc;

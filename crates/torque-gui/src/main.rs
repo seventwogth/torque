@@ -1,16 +1,14 @@
 //! Torque's desktop UI.
 //!
 //! egui is immediate-mode and synchronous, while the engine is async. The seam
-//! is deliberate and must stay: the UI never awaits anything. Once the service
-//! exists (stage 4) a background thread owns the connection and pushes
-//! snapshots over a channel, calling `ctx.request_repaint()`; `update` only
-//! ever reads the newest snapshot.
-//!
-//! Today nothing is connected, so the panels render an explicitly disconnected
-//! state — except the bridge editor, whose validation is real and local.
+//! is deliberate and must stay: the UI never awaits anything. A background
+//! thread owns the engine and pushes snapshots over a channel, calling
+//! `ctx.request_repaint()`; `ui` only ever reads the newest snapshot. See
+//! [`link`].
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod link;
 mod panels;
 
 use egui::ViewportBuilder;
@@ -36,6 +34,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Torque",
         options,
-        Box::new(|_cc| Ok(Box::new(TorqueApp::default()))),
+        Box::new(|cc| Ok(Box::new(TorqueApp::new(&cc.egui_ctx)))),
     )
 }
