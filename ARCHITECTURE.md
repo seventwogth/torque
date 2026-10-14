@@ -59,6 +59,15 @@ actor task and every request reaches it as a message carrying a `oneshot` for
 the reply. Request/response pairing therefore lives in one place instead of in
 each session.
 
+The UI works without the service as well, driving tor itself. That is a
+legitimate mode rather than a degraded one: proxy-only needs no privileges at
+all, and the service is required only for transparent routing. Without the
+fallback the app would be unusable until there is an installer. The backend is
+chosen once at startup and not revisited — migrating a live session between
+backends would mean orphaning or killing a running tor, which is a worse
+surprise than asking for a restart — and the UI names which backend it is on,
+since that decides what it is allowed to do.
+
 Access control on that endpoint is sequenced with elevation rather than
 bolted on early: today the service is unelevated and runs as the same user as
 the UI, so the endpoint's default security is already the right boundary — the
@@ -224,11 +233,11 @@ Stage numbers are referenced from `torque_router::Error::NotImplemented`.
 3. **Bridges and transports** — editor, obfs4/snowflake/webtunnel, live
    `SETCONF` with no restart. *Done.*
 4. **Service** — IPC transport and protocol, one actor owning tor, a client in
-   `torque-cli` to exercise it. *Done.* Supervision still also lives in the
-   UI; moving it behind the service is next. Two pieces were re-sequenced out
-   of this stage on purpose: the endpoint ACL belongs with elevation in stage
-   6, and registration as a platform service belongs with the installer in
-   stage 8 — see below.
+   `torque-cli`, and the UI using the service when one is running or driving
+   tor itself when none is. *Done.* Two pieces were re-sequenced out of this
+   stage on purpose: the endpoint ACL belongs with elevation in stage 6, and
+   registration as a platform service belongs with the installer in stage 8 —
+   see below.
 5. **Flow engine and ProxyBridge** — Wintun, userspace TCP/IP stack, `DNSPort`
    and `AutomapHostsOnResolve`, flow-to-process attribution, `torque-policy`
    evaluation, per-rule stream isolation, rules editor in the UI. Windows

@@ -3,7 +3,7 @@ use torque_core::bridges::{BridgeLine, ParseError, parse_many, required_transpor
 use torque_core::format::{human_rate, relay_nickname};
 use torque_ipc::RoutingMode;
 
-use crate::link::{Command, EngineLink, Snapshot, Status};
+use crate::link::{Command, EngineLink, Mode, Snapshot, Status};
 
 const WARN: Color32 = Color32::from_rgb(0xc0, 0x6b, 0x2a);
 const BAD: Color32 = Color32::from_rgb(0xd6, 0x4a, 0x4a);
@@ -101,6 +101,11 @@ impl eframe::App for TorqueApp {
                 ui.colored_label(color, "\u{25cf}");
                 ui.label(text);
                 ui.separator();
+                ui.label(match &snapshot.mode {
+                    Mode::Service { version } => format!("service {version}"),
+                    Mode::Unprivileged => "unprivileged".to_owned(),
+                });
+                ui.separator();
                 ui.label(match self.routing {
                     RoutingMode::ProxyOnly => "proxy only",
                     RoutingMode::Transparent => "transparent (not active)",
@@ -116,7 +121,7 @@ impl eframe::App for TorqueApp {
             Tab::Status => self.status_panel(ui, &snapshot),
             Tab::Circuits => self.circuits_panel(ui, &snapshot),
             Tab::Bridges => self.bridges_panel(ui, &snapshot),
-            Tab::Routing => self.routing_panel(ui),
+            Tab::Routing => self.routing_panel(ui, &snapshot),
             Tab::Log => self.log_panel(ui, &snapshot),
         });
     }
@@ -127,9 +132,9 @@ impl TorqueApp {
         ui.heading("Status");
         ui.add_space(8.0);
 
-        let bootstrap = &snapshot.state.bootstrap;
+        let summary = &snapshot.view.bootstrap_summary;
         ui.add(
-            egui::ProgressBar::new(f32::from(bootstrap.progress) / 100.0)
+            egui::ProgressBar::new(f32::from(snapshot.view.bootstrap_progress) / 100.0)
                 .show_percentage()
                 .desired_height(18.0),
         );
@@ -140,8 +145,8 @@ impl TorqueApp {
             }
             ui.label(match &snapshot.status {
                 Status::Disconnected => "not started".to_owned(),
-                Status::Starting if bootstrap.summary.is_empty() => "launching tor".to_owned(),
-                _ if !bootstrap.summary.is_empty() => bootstrap.summary.clone(),
+                Status::Starting if summary.is_empty() => "launching tor".to_owned(),
+                _ if !summary.is_empty() => summary.clone(),
                 Status::Running => "connected".to_owned(),
                 Status::Starting => "launching tor".to_owned(),
                 Status::Failed(_) => String::new(),
@@ -195,7 +200,7 @@ impl TorqueApp {
         }
 
         ui.add_space(16.0);
-        let sample = snapshot.state.latest_bandwidth();
+        let sample = snapshot.view.latest_bandwidth();
         ui.horizontal(|ui| {
             ui.colored_label(READ, "\u{25bc}");
             ui.label(human_rate(sample.read));
@@ -211,7 +216,7 @@ impl TorqueApp {
         ui.heading("Circuits");
         ui.add_space(8.0);
 
-        if snapshot.state.circuits.is_empty() {
+        if snapshot.view.circuits.is_empty() {
             ui.label(
                 RichText::new(if snapshot.status.is_running() {
                     "No circuits yet."
@@ -234,7 +239,7 @@ impl TorqueApp {
                     ui.label(RichText::new("Streams").strong());
                     ui.end_row();
 
-                    for circuit in snapshot.state.circuits.values() {
+                    for circuit in &snapshot.view.circuits {
                         ui.label(&circuit.id);
                         ui.label(&circuit.status);
                         ui.label(
@@ -250,12 +255,7 @@ impl TorqueApp {
                         ui.label(if circuit.streams.is_empty() {
                             "\u{2014}".to_owned()
                         } else {
-                            circuit
-                                .streams
-                                .values()
-                                .map(String::as_str)
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            circuit.streams.join(", ")
                         });
                         ui.end_row();
                     }
@@ -383,7 +383,7 @@ impl TorqueApp {
         });
     }
 
-    fn routing_panel(&mut self, ui: &mut Ui) {
+    fn routing_panel(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
         ui.heading("Routing");
         ui.add_space(8.0);
 
@@ -392,11 +392,28 @@ impl TorqueApp {
             RoutingMode::ProxyOnly,
             "Proxy only \u{2014} apps opt in via SOCKS",
         );
-        ui.radio_value(
-            &mut self.routing,
-            RoutingMode::Transparent,
-            "Transparent \u{2014} route everything through Tor",
-        );
+
+        let service = matches!(snapshot.mode, Mode::Service { .. });
+        ui.add_enabled_ui(service, |ui| {
+            ui.radio_value(
+                &mut self.routing,
+                RoutingMode::Transparent,
+                "Transparent \u{2014} route everything through Tor",
+            );
+        });
+
+        if !service {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "Transparent routing needs the privileged service. This session is driving \
+                     tor directly, which needs no privileges and can only act as a proxy. Start \
+                     torque-service and reopen Torque to use it.",
+                )
+                .weak(),
+            );
+            return;
+        }
 
         if self.routing == RoutingMode::Transparent {
             ui.add_space(12.0);
@@ -408,27 +425,49 @@ impl TorqueApp {
             ui.add_space(4.0);
             ui.label(
                 RichText::new(
-                    "Transparent mode needs the privileged service, a TUN adapter and firewall \
-                     filters. Until those land, this setting only changes the generated torrc.",
+                    "Transparent mode needs a TUN adapter and firewall filters. Until those \
+                     land, the service will refuse this mode rather than half-apply it.",
                 )
                 .weak(),
             );
         }
+
+        ui.add_space(16.0);
+        ui.label(RichText::new("Routing rules").strong());
+        ui.label(
+            RichText::new(if snapshot.policy_enforced {
+                "Rules are being enforced."
+            } else {
+                "No flow engine is reading routing rules yet, so none are enforced. The editor \
+                 arrives with the engine that can act on it."
+            })
+            .weak(),
+        );
     }
 
     fn log_panel(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
         ui.heading("Log");
         ui.add_space(8.0);
 
-        if snapshot.state.log.is_empty() {
-            ui.label(RichText::new("Nothing logged yet.").weak());
+        if snapshot.view.log.is_empty() {
+            ui.label(
+                RichText::new(match snapshot.mode {
+                    // Worth saying which it is: an empty log that cannot fill
+                    // looks identical to a quiet one.
+                    Mode::Service { .. } => {
+                        "The service does not forward tor's log over IPC yet."
+                    }
+                    Mode::Unprivileged => "Nothing logged yet.",
+                })
+                .weak(),
+            );
             return;
         }
 
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                for entry in &snapshot.state.log {
+                for entry in &snapshot.view.log {
                     ui.label(format!("{:?}  {}", entry.level, entry.message));
                 }
             });
@@ -456,7 +495,7 @@ fn bandwidth_graph(ui: &mut Ui, snapshot: &Snapshot) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
 
-    let samples = &snapshot.state.bandwidth;
+    let samples = &snapshot.view.bandwidth;
     if samples.is_empty() {
         painter.text(
             rect.center(),

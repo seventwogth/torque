@@ -9,7 +9,8 @@ bundled C-tor driven over its control protocol.
 
 > **Status: early.** Usable as a SOCKS proxy client: it starts and stops tor,
 > shows bootstrap, circuits and bandwidth live, and switches bridges and
-> transports without a restart. Transparent routing and per-app rules are not
+> transports without a restart. It runs on its own, and uses the privileged
+> service when one is running. Transparent routing and per-app rules are not
 > implemented — see the roadmap in [ARCHITECTURE.md](ARCHITECTURE.md). Do not
 > rely on this for anything that matters yet.
 
