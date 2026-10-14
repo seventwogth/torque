@@ -30,8 +30,8 @@ torque-control   Tor control protocol: cookie auth, SETCONF/SETEVENTS,
                  reply parser, BW/CIRC/STREAM/STATUS_CLIENT events
 torque-bridges   bridge-line parsing and validation; which transports a
                  bridge set requires
-torque-policy    (planned) per-app and per-host routing rules: the model and
-                 the evaluation, no I/O
+torque-policy    per-app and per-host routing rules: the model and the
+                 evaluation, no I/O
 torque-core      torrc generation, tor process supervision, state model
 torque-router    trait TrafficRouter + per-platform backends
 torque-ipc       newline-delimited JSON protocol, GUI <-> service
@@ -127,19 +127,34 @@ blocked, or it only ever matches on IP.
 
 ### The rule model
 
-A new crate, `torque-policy`: pure logic, no I/O, tested like
-`torque-bridges`.
+`torque-policy`: pure logic, no I/O, tested like `torque-bridges`.
 
 ```
 Policy  { rules: Vec<Rule>, default: Action }
-Rule    { enabled: bool, matcher: Matcher, action: Action }
-Matcher = Process(path | file name) | Domain(exact | suffix)
-        | Ip(cidr) | Port(range) | All(..) | Any(..) | Not(..)
+Rule    { enabled: bool, label: Option<String>, matcher: Matcher, action: Action }
+Matcher = Always | Process(path | file name) | Domain(exact | suffix)
+        | Ip(cidr) | Port(range) | Protocol(tcp | udp)
+        | All(..) | Any(..) | Not(..)
 Action  = Tor { isolation: Option<String> } | Direct | Block
+
+Policy::decide(&Flow) -> Outcome { decision, rule: Option<usize> }
+Decision = Tor { isolation } | Direct | Blocked { reason }
 ```
 
-First match wins. `default` is `Tor`, and the type should make any other
-default an explicit choice by the user.
+First match wins, and `Outcome` carries which rule it was, so "why did this
+app go that way" is answerable rather than guessed at. `default` is `Tor`, and
+anything else is an explicit choice by the user.
+
+Two decisions worth keeping:
+
+- **`Blocked` carries a reason**, distinguishing a rule's `Block` from
+  `TorCarriesNoUdp`. An app that silently goes quiet is the hardest thing
+  about this mode to debug, so the engine should be able to say which it was.
+- **`Policy::lints()`** returns advisory warnings for the editor: a default
+  that leaves Tor, a rule shadowed by an earlier catch-all, UDP routed into
+  Tor, an onion address routed out of it. It is deliberately conservative and
+  does not descend into `Not`, since a noisy warning list gets ignored and
+  then the real warning goes unread.
 
 The `isolation` tag is close to free and worth having: tor isolates circuits
 by SOCKS credentials, with `IsolateSOCKSAuth` on by default, so passing a
@@ -203,8 +218,9 @@ Stage numbers are referenced from `torque_router::Error::NotImplemented`.
 5. **Flow engine and ProxyBridge** — Wintun, userspace TCP/IP stack, `DNSPort`
    and `AutomapHostsOnResolve`, flow-to-process attribution, `torque-policy`
    evaluation, per-rule stream isolation, rules editor in the UI. Windows
-   first. `torque-policy` itself has no dependency on the rest of this stage
-   and can land earlier.
+   first. `torque-policy` itself has landed ahead of the engine that calls it,
+   so the IPC protocol in stage 4 can carry rules from the start rather than
+   versioning them in later.
 6. **Kill switch** — WFP filters, UDP and IPv6 blocked. Transparent mode may
    only be called safe once this ships, and transparent-with-rules is labelled
    separately from transparent-everything.

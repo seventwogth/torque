@@ -9,5 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+torque-policy.workspace = true
+
 serde.workspace = true
 serde_json.workspace = true

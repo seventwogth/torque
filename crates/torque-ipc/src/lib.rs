@@ -11,8 +11,12 @@
 //!
 //! Deliberately plain data: no types from `torque-core` cross this boundary,
 //! so the service can be upgraded without the GUI's types following along.
+//! `torque-policy` is the one exception, and an intentional one — it is a
+//! leaf crate with no I/O, so sharing it makes the two halves agree on a
+//! vocabulary instead of leaking an implementation across.
 
 use serde::{Deserialize, Serialize};
+use torque_policy::{Lint, Policy};
 
 /// Bumped whenever the message shapes change; both ends refuse a mismatch
 /// rather than guessing.
@@ -38,6 +42,11 @@ pub enum Request {
     /// Bridge lines as the user typed them; the service parses and validates.
     SetBridges { lines: Vec<String> },
     SetRoutingMode { mode: RoutingMode },
+    GetPolicy,
+    /// Replace the routing rules. The service answers with the lints it found,
+    /// so the warnings the user sees come from the side that enforces the
+    /// rules rather than from a second copy of the checks in the UI.
+    SetPolicy { policy: Policy },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -58,6 +67,10 @@ pub enum Response {
     /// A rejected bridge line, reported with the index the GUI should mark.
     InvalidBridges {
         errors: Vec<BridgeError>,
+    },
+    Policy {
+        policy: Policy,
+        lints: Vec<Lint>,
     },
     Error {
         message: String,
@@ -136,6 +149,35 @@ mod tests {
     fn requests_are_externally_tagged_for_forward_compatibility() {
         let frame = encode(&Request::Status).expect("serializable");
         assert!(frame.contains(r#""request":"status""#));
+    }
+
+    #[test]
+    fn a_policy_survives_the_wire() {
+        use torque_policy::{Action, Matcher, ProcessMatch, Rule};
+
+        let request = Request::SetPolicy {
+            policy: torque_policy::Policy::new(vec![Rule::new(
+                Matcher::Process(ProcessMatch::Name("curl.exe".to_owned())),
+                Action::Direct,
+            )]),
+        };
+        let frame = encode(&request).expect("serializable");
+        assert_eq!(decode::<Request>(&frame).expect("decodable"), request);
+    }
+
+    #[test]
+    fn lints_cross_the_boundary_with_their_structure_intact() {
+        // Rendering them to strings here would cost the UI the rule index it
+        // needs to point at the offending row.
+        let response = Response::Policy {
+            policy: torque_policy::Policy::default(),
+            lints: vec![Lint::Unreachable {
+                index: 2,
+                shadowed_by: 0,
+            }],
+        };
+        let frame = encode(&response).expect("serializable");
+        assert_eq!(decode::<Response>(&frame).expect("decodable"), response);
     }
 
     #[test]

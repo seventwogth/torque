@@ -52,6 +52,7 @@ repository.
 |---|---|
 | `torque-control` | Tor control protocol client |
 | `torque-bridges` | bridge-line parsing and validation |
+| `torque-policy` | per-app and per-host routing rules |
 | `torque-core` | torrc generation, process supervision, state model |
 | `torque-router` | per-platform traffic routing backends |
 | `torque-ipc` | GUI ↔ service protocol |

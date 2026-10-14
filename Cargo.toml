@@ -15,6 +15,7 @@ torque-bridges = { path = "crates/torque-bridges", version = "0.0.1" }
 torque-control = { path = "crates/torque-control", version = "0.0.1" }
 torque-core = { path = "crates/torque-core", version = "0.0.1" }
 torque-ipc = { path = "crates/torque-ipc", version = "0.0.1" }
+torque-policy = { path = "crates/torque-policy", version = "0.0.1" }
 torque-router = { path = "crates/torque-router", version = "0.0.1" }
 
 anyhow = "1.0.104"
